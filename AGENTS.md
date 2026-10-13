@@ -1,140 +1,84 @@
-# Instructions
+# Agent instructions for pi-enable-image
 
-## 🚨 HARD GATE: Template Checkout Check (BLOCKING)
+This repository is a pi coding agent extension. When the active model can't accept images, the extension sends each image to a multimodal backup model. It then replaces the image in the user's message with a text description.
 
-**Before ANY other step — no installs, no edits, no file creation — verify this checkout is not still the untouched template. Two acceptable states:**
+If you are doing a code review, read [CODE_REVIEWS.md](CODE_REVIEWS.md) first and follow it.
 
-1. The working directory is a **copy** of this template under a name other than `pi-template` (with `.git` removed or re-initialized), OR
-2. The user has explicitly confirmed this checkout is staying in place and **`.git` has been deleted** (`rm -rf .git`).
+## Files
 
-**If the working directory is still named `pi-template` and still contains a `.git` directory pointing at the template origin:**
-- STOP. Do not run `npm install`, do not edit files, do not scaffold anything.
-- Ask the user for a target path and run the copy command below, or get explicit approval to `rm -rf .git` in place.
-- Only after the gate passes may the setup steps proceed.
+| Path | Purpose |
+|------|---------|
+| `extensions/index.ts` | The whole extension: the `/image-backup-model` command, the `input` event handler, settings persistence, clipboard path detection, and the side query to the backup model. |
+| `package.json` | Package manifest. `pi.extensions` points pi at `extensions/index.ts`. Declares pi packages as peers. |
+| `tsconfig.json` | Strict TypeScript config (ESNext, NodeNext). Used only for typechecking; pi loads TS through jiti, so there is no build step. |
+| `README.md` | User docs: install, configure, how it works. |
+| `.gitignore` | Ignores `node_modules`, `dist`, `.pi`, env files, and logs. |
+| `AGENTS.md` | This file. |
+| `CODE_REVIEWS.md` | Review checklist and required patterns. |
 
-Check with: `basename "$PWD"` and `[ -d .git ]`.
+## Entry points
 
-## Setting Up a New Extension Repository
+- `export default function imageBackupModel(pi: ExtensionAPI)` in `extensions/index.ts`. pi calls this factory on load.
+- Command `/image-backup-model`: lists image-capable models (scoped models first, else all available) and saves the choice.
+- Event `pi.on("input", ...)`: runs on every user message. It does the following:
+  1. Skips messages where `event.source === "extension"`.
+  2. Collects attached images and image file paths found in the text.
+  3. Returns `continue` if there are no images or the active model supports images.
+  4. Resolves the backup model and checks it exists, supports images, and has auth.
+  5. Describes each image, then returns `transform` with the description text and `images: []`.
+- Persisted state: `~/<CONFIG_DIR_NAME>/image-backup-model.json` with shape `{ "backupModel": "<provider>/<model-id>" }`.
 
-Use this repo as a template. Quick steps (the HARD GATE above precedes all of these):
+## Commands
 
-1. Copy this template to a new directory (Linux/macOS, no `.git` included). Do not run this inside pi-template itself; suggest the command if the user needs help. If the directory you are working in is still named `pi-template`, copy out first before making any changes there.
-   ```
-   rsync -vrt --delete --delete-excluded --exclude node_modules --exclude .git ./ /path/to/new-repo/
-   ```
-2. `npm init -y`
-3. `npm install --save-dev typescript vitest @types/node @earendil-works/pi-coding-agent` and `npm install typebox`. The pi package ships docs and examples under `node_modules/@earendil-works/pi-coding-agent/`.
-4. Keep/adjust `tsconfig.json` (ESNext, NodeNext, strict). No build step needed; pi loads TS via jiti. Use `npx tsc --noEmit` for typechecking only.
-5. `package.json` must have `main`/`pi.extensions` pointing at the entry point (default `extensions/index.ts`), `keywords: ["pi-package"]`, `typebox` in `dependencies`, and `@earendil-works/pi-coding-agent` as a peer.
-6. Extension entry point exports a default factory receiving `ExtensionAPI` (see `extensions/index.ts` in this repo). Package names: `@earendil-works/pi-coding-agent` and `typebox`; `@mariozechner/pi-coding-agent` and `@sinclair/typebox` are obsolete.
-7. Test with `npx tsc --noEmit` then `pi -e ./extensions/index.ts` (quick tests only). For auto-discovery and `/reload`, place extensions in `~/.pi/agent/extensions/` or project `.pi/extensions/`.
-8. Publish: `npm publish` after version bump; users run `pi install npm:<name>`. Runtime deps must be in `dependencies` (pi installs with `--omit=dev`).
+```bash
+npm install
+npm run typecheck              # tsc --noEmit, must pass with zero errors
+npm test                       # vitest run; exits 1 until test files exist
+pi -e ./extensions/index.ts    # load the extension in pi for a manual test
+```
 
-Key APIs: `pi.registerTool()`, `pi.on(event, handler)` (`session_start`, `session_shutdown`, `before_agent_start`, `tool_call`, `tool_result`, `turn_start`/`turn_end`, ...), `pi.registerCommand("name", {...})`, `ctx.ui` (notify, setStatus, setWidget, select, confirm, input, editor).
+pi docs and examples ship in `node_modules/@earendil-works/pi-coding-agent/docs/` and `.../examples/extensions/`. Read `events.md` (the `input` event), `extension-context.md`, and `extension-api.md` before you change the handler.
 
-## Examples Reference
+## Coding standards
 
-All examples in `node_modules/@earendil-works/pi-coding-agent/examples/extensions/` (after `npm install`; they ship inside the pi package).
+### Language and types
 
-| Example | Description | Key APIs |
-|---------|-------------|----------|
-| **Tools** |||
-| `hello.ts` | Minimal tool registration | `registerTool` |
-| `question.ts` | Tool with user interaction | `registerTool`, `ui.select` |
-| `questionnaire.ts` | Multi-step wizard tool | `registerTool`, `ui.custom` |
-| `todo.ts` | Stateful tool with persistence | `registerTool`, `appendEntry`, `renderResult`, session events |
-| `dynamic-tools.ts` | Register tools after startup and during commands | `registerTool`, `session_start`, `registerCommand` |
-| `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
-| `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
-| **Commands** |||
-| `pirate.ts` | Modify system prompt per-turn | `registerCommand`, `before_agent_start` |
-| `summarize.ts` | Conversation summary command | `registerCommand`, `ui.custom` |
-| `handoff.ts` | Cross-provider model handoff | `registerCommand`, `ui.editor`, `ui.custom` |
-| `qna.ts` | Q&A with custom UI | `registerCommand`, `ui.custom`, `setEditorText` |
-| `send-user-message.ts` | Inject user messages | `registerCommand`, `sendUserMessage` |
-| `reload-runtime.ts` | Reload command and LLM tool handoff | `registerCommand`, `ctx.reload()`, `sendUserMessage` |
-| `shutdown-command.ts` | Graceful shutdown command | `registerCommand`, `shutdown()` |
-| **Events & Gates** |||
-| `permission-gate.ts` | Block dangerous commands | `on("tool_call")`, `ui.confirm` |
-| `protected-paths.ts` | Block writes to specific paths | `on("tool_call")` |
-| `confirm-destructive.ts` | Confirm session changes | `on("session_before_switch")`, `on("session_before_fork")` |
-| `dirty-repo-guard.ts` | Warn on dirty git repo | `on("session_before_*")`, `exec` |
-| `input-transform.ts` | Transform user input | `on("input")` |
-| `model-status.ts` | React to model changes | `on("model_select")`, `setStatus` |
-| `system-prompt-header.ts` | Display system prompt info | `on("agent_start")`, `getSystemPrompt` |
-| `claude-rules.ts` | Load rules from files | `on("session_start")`, `on("before_agent_start")` |
-| `file-trigger.ts` | File watcher triggers messages | `sendMessage` |
-| **Compaction & Sessions** |||
-| `custom-compaction.ts` | Custom compaction summary | `on("session_before_compact")` |
-| `trigger-compact.ts` | Trigger compaction manually | `compact()` |
-| `git-checkpoint.ts` | Git stash on turns | `on("turn_end")`, `on("session_fork")`, `exec` |
-| `auto-commit-on-exit.ts` | Commit on shutdown | `on("session_shutdown")`, `exec` |
-| **UI Components** |||
-| `status-line.ts` | Footer status indicator | `setStatus`, session events |
-| `custom-footer.ts` | Replace footer entirely | `registerCommand`, `setFooter` |
-| `custom-header.ts` | Replace startup header | `on("session_start")`, `setHeader` |
-| `modal-editor.ts` | Vim-style modal editor | `setEditorComponent`, `CustomEditor` |
-| `rainbow-editor.ts` | Custom editor styling | `setEditorComponent` |
-| `widget-placement.ts` | Widget above/below editor | `setWidget` |
-| `overlay-test.ts` | Overlay components | `ui.custom` with overlay options |
-| `overlay-qa-tests.ts` | Comprehensive overlay tests | `ui.custom`, all overlay options |
-| `notify.ts` | Simple notifications | `ui.notify` |
-| `timed-confirm.ts` | Dialogs with timeout | `ui.confirm` with timeout/signal |
-| `mac-system-theme.ts` | Auto-switch theme | `setTheme`, `exec` |
-| **Complex Extensions** |||
-| `plan-mode/` | Full plan mode implementation | All event types, `registerCommand`, `registerShortcut`, `registerFlag`, `setStatus`, `setWidget`, `sendMessage`, `setActiveTools` |
-| `preset.ts` | Saveable presets (model, tools, thinking) | `registerCommand`, `registerShortcut`, `registerFlag`, `setModel`, `setActiveTools`, `setThinkingLevel`, `appendEntry` |
-| `tools.ts` | Toggle tools on/off UI | `registerCommand`, `setActiveTools`, `SettingsList`, session events |
-| **Remote & Sandbox** |||
-| `ssh.ts` | SSH remote execution | `registerFlag`, `on("user_bash")`, `on("before_agent_start")`, tool operations |
-| `interactive-shell.ts` | Persistent shell session | `on("user_bash")` |
-| `sandbox/` | Sandboxed tool execution | Tool operations |
-| `subagent/` | Spawn sub-agents | `registerTool`, `exec` |
-| **Games** |||
-| `snake.ts` | Snake game | `registerCommand`, `ui.custom`, keyboard handling |
-| `space-invaders.ts` | Space Invaders game | `registerCommand`, `ui.custom` |
-| `doom-overlay/` | Doom in overlay | `ui.custom` with overlay |
-| **Providers** |||
-| `custom-provider-anthropic/` | Custom Anthropic proxy | `registerProvider` |
-| `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |
-| **Messages & Communication** |||
-| `message-renderer.ts` | Custom message rendering | `registerMessageRenderer`, `sendMessage` |
-| `event-bus.ts` | Inter-extension events | `pi.events` |
-| **Session Metadata** |||
-| `session-name.ts` | Name sessions for selector | `setSessionName`, `getSessionName` |
-| `bookmark.ts` | Bookmark entries for /tree | `setLabel` |
-| **Misc** |||
-| `antigravity-image-gen.ts` | Image generation tool | `registerTool`, Google Antigravity |
-| `inline-bash.ts` | Inline bash in tool calls | `on("tool_call")` |
-| `bash-spawn-hook.ts` | Adjust bash command, cwd, and env before execution | `createBashTool`, `spawnHook` |
-| `with-deps/` | Extension with npm dependencies | Package structure with `package.json` |
+- Write TypeScript under `strict`. Don't use `any`, `@ts-ignore`, or non-null `!` assertions. Narrow with type guards.
+- Use `import type` for type-only imports.
+- Import pi APIs from `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`, and schemas from `typebox`. The packages `@mariozechner/*` and `@sinclair/typebox` are obsolete. Don't use them.
+- Use `node:` prefixes for built-ins (`node:fs`, `node:path`).
+- Give every function explicit parameter and return types. Exception: the default export factory.
+- Lines are 120 characters max. Indent with tabs, use double quotes and semicolons, and match the existing file.
 
-## Documentation
+### Structure
 
-Read the docs shipped inside the installed pi package:
+- Keep pure helpers (parsing, filtering, formatting) as top-level functions that don't touch `ctx`. This keeps them unit-testable.
+- Pass `ctx` or `ExtensionContext` in as a parameter. Don't capture it in module state.
+- Put magic strings and numbers in top-level `UPPER_SNAKE_CASE` constants. Examples: prompt text, settings filename, status key, `maxTokens`.
+- Build paths with `node:path` `join`. Don't concatenate path strings.
+- Keep the extension in a single file until it passes about 300 lines. Split by responsibility after that, into files such as `settings.ts`, `images.ts`, and `describe.ts`.
+- Don't add runtime dependencies for things `node:` or pi already provide. Runtime deps go in `dependencies`, because pi installs with `--omit=dev`.
 
-`node_modules/@earendil-works/pi-coding-agent/docs/`
+### Behavior rules for the `input` handler
 
-Run `npm install` first if the directory is missing. When pi runs from its own installation, the docs are also at the package install root, e.g.:
+- Fail open. Any error or missing configuration must return `{ action: "continue" }` with the user's message unchanged, plus a `ctx.ui.notify` that explains why. Never drop or block the message silently.
+- Never transform input from `source === "extension"`.
+- Exit early when the active model supports images. The extension must cost nothing for multimodal models.
+- Clear every `ctx.ui.setStatus` key you set, on success and on failure. Use `finally` when you can.
+- Validate the backup model before you call it: it exists, `input` includes `"image"`, and `hasConfiguredAuth` is true.
+- Treat file paths from user text as untrusted. Check that the file exists and that `detectSupportedImageMimeTypeFromFile` accepts it before you read it.
+- Keep settings reads tolerant. If the JSON is missing or malformed, return `undefined`. Don't throw.
 
-`/Users/arivera/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md`
+### Testing
 
-Start with:
+- Use Vitest. Put tests next to the code as `*.test.ts`, or in `test/`.
+- Write unit tests for pure helpers: `IMAGE_PATH_PATTERN` matching, `extractImageAttachments`, `supportsImages`, `candidateModels`, and settings load and save against a temp `HOME`.
+- Test the `input` handler with a fake `ctx` (stub `modelRegistry`, `ui`, and `model`). Cover each early return and the transform path.
+- Don't call real model providers in tests.
 
-| File | Description |
-|------|-------------|
-| `extensions.md` | Main intro, key capabilities, table of contents |
-| `quick-start.md` | Quick start example |
-| `extension-locations.md` | Where to place extensions |
-| `available-imports.md` | Available npm packages |
-| `writing-an-extension.md` | How to write extensions |
-| `events.md` | Lifecycle, session, agent, tool, model, input events |
-| `extension-context.md` | ExtensionContext API |
-| `extension-command-context.md` | Command-specific context methods |
-| `extension-api.md` | ExtensionAPI methods (registerTool, sendMessage, etc.) |
-| `state-management.md` | Persisting state across sessions |
-| `custom-tools.md` | Custom tool registration, override, rendering |
-| `custom-ui.md` | Dialogs, widgets, custom components |
-| `error-handling.md` | Error handling behavior |
-| `mode-behavior.md` | Interactive/RPC/JSON/Print modes |
-| `packages.md` | Sharing extensions as npm/git pi packages |
+### Done criteria
+
+- `npm run typecheck` passes with zero errors.
+- `npm test` passes.
+- `README.md` matches any user-visible change: the command name, the settings path, or the behavior.
+- Remove dead code and unused imports, and update `AGENTS.md` when you add, remove, or rename files or entry points.
