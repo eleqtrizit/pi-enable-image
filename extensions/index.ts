@@ -1,12 +1,16 @@
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
+	detectSupportedImageMimeTypeFromFile,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type InputEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+// Clipboard image paths (e.g. /tmp/pi-clipboard-<uuid>.png) arrive as plain text.
+const IMAGE_PATH_PATTERN = /(?:^|\s)(\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp))(?=\s|$)/gi;
 
 const DESCRIPTION_PROMPT =
 	"Describe this image thoroughly and precisely: its type (screenshot, diagram, photo, ...), all visible text, layout, UI elements under discussion, and whatever a reader would need to act on its contents. Plain prose, no preamble.";
@@ -48,6 +52,31 @@ function candidateModels(ctx: ExtensionContext): Model<Api>[] {
 	const scoped = ctx.scopedModels.map((s) => s.model);
 	const pool = scoped.length > 0 ? scoped : ctx.modelRegistry.getAvailable();
 	return pool.filter((m) => supportsImages(m));
+}
+
+/** Find image file paths in the prompt text, verify each is a supported image, and load it as an attachment. */
+async function extractImageAttachments(
+	text: string,
+): Promise<{ images: ImageContent[]; remainingText: string }> {
+	const paths = [...text.matchAll(IMAGE_PATH_PATTERN)].map((m) => m[1] ?? "").filter(Boolean);
+	if (paths.length === 0) return { images: [], remainingText: text };
+
+	const images: ImageContent[] = [];
+	const kept: string[] = [];
+	for (const path of paths) {
+		if (!existsSync(path)) {
+			kept.push(path);
+			continue;
+		}
+		const mimeType = await detectSupportedImageMimeTypeFromFile(path);
+		if (!mimeType) {
+			kept.push(path);
+			continue;
+		}
+		images.push({ type: "image", data: readFileSync(path, "base64"), mimeType });
+	}
+	const remainingText = kept.length === paths.length ? text : text.replace(IMAGE_PATH_PATTERN, " ").trim();
+	return { images, remainingText };
 }
 
 async function describeImage(
@@ -100,7 +129,11 @@ export default function imageBackupModel(pi: ExtensionAPI) {
 	pi.on("input", async (event, ctx): Promise<InputEventResult> => {
 		// Only touch real user input; never extension-injected messages.
 		if (event.source === "extension") return { action: "continue" };
-		if (!event.images || event.images.length === 0) return { action: "continue" };
+
+		// Clipboard image pastes arrive as plain file paths in the text, not as attachments.
+		const { images: fromPaths, remainingText } = await extractImageAttachments(event.text);
+		const images = [...(event.images ?? []), ...fromPaths];
+		if (images.length === 0) return { action: "continue" };
 		if (supportsImages(ctx.model)) return { action: "continue" };
 
 		const backupId = loadBackupModelId();
@@ -121,7 +154,7 @@ export default function imageBackupModel(pi: ExtensionAPI) {
 
 		try {
 			const descriptions: string[] = [];
-			for (const image of event.images) {
+			for (const image of images) {
 				ctx.ui.setStatus("image-backup", `Describing image with ${backupId}...`);
 				descriptions.push(await describeImage(backupModel, image, ctx));
 			}
@@ -130,7 +163,7 @@ export default function imageBackupModel(pi: ExtensionAPI) {
 			const block = descriptions
 				.map((d) => `<image description>\n${d}\n</image description>`)
 				.join("\n\n");
-			const text = event.text.trim() ? `${event.text}\n\n${block}` : block;
+			const text = remainingText.trim() ? `${remainingText}\n\n${block}` : block;
 			// Drop the images from the outgoing message; the text-only model gets prose instead.
 			return { action: "transform", text, images: [] };
 		} catch (error) {
