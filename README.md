@@ -18,8 +18,8 @@ Then run `/image-backup-model` once to pick the multimodal model used to describ
 - Ask the agent to use it, for example: "Run read-image on /tmp/screenshot.png and tell me which field in this dialog fails validation."
 - The tool validates the file, sends it to the backup model, and returns the description: visible text, layout, UI elements, and anything needed to act on the contents.
 - The tool's result carries the side query's token usage, so session totals stay accurate.
+- The tool is active only while the current model cannot view images. Run `/model` to switch, and pi enables or withdraws `read-image` automatically, so image-capable models never see it.
 - Every failure returns an error message the agent can read and act on: missing file, unsupported format, unset or unavailable backup model, missing auth, or a provider error.
-- An image-capable model can view images directly and does not need the tool.
 
 ## Development
 

@@ -22,6 +22,7 @@ If you are doing a code review, read [CODE_REVIEWS.md](CODE_REVIEWS.md) first an
 - `export default function imageBackupModel(pi: ExtensionAPI)` in `extensions/index.ts`. pi calls this factory on load.
 - Command `/image-backup-model`: lists image-capable models (scoped models first, else all available) and saves the choice.
 - Tool `read-image`: takes one `path` argument. It validates the file, asks the configured backup model to describe it, and returns the description text plus the side query's `usage`. Failures throw from `execute`; pi reports the message to the model as the tool's error result.
+- Activation gate: on `session_start` and `model_select`, the extension calls `pi.setActiveTools` so `read-image` is declared only while the active model cannot view images. A missing model counts as text-only. The sync skips no-op updates.
 - Persisted state: `~/<CONFIG_DIR_NAME>/image-backup-model.json` with shape `{ "backupModel": "<provider>/<model-id>" }`.
 
 Do not add an `input` event handler or transform user messages. The earlier input-interception design was removed on purpose.
@@ -59,6 +60,7 @@ pi docs and examples ship in `node_modules/@earendil-works/pi-coding-agent/docs/
 
 ### Behavior rules for the `read-image` tool
 
+- Keep `read-image` active only while the active model cannot view images. Re-evaluate on `session_start` and `model_select`, and skip the `setActiveTools` call when membership already matches. A missing model counts as text-only.
 - Validate the path before reading anything: it must resolve to an existing file, and `detectSupportedImageMimeTypeFromFile` must accept it. Model-provided paths are untrusted.
 - Validate the backup model before calling it: it exists, `input` includes `"image"`, and `hasConfiguredAuth` is true.
 - Report every failure by throwing from `execute` with a message the model can act on (missing file, unsupported format, unset or unavailable backup model, missing auth, provider error). Never return a success-shaped result for a failure; pi 0.84.x marks a result as failed only on a thrown error.

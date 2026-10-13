@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	activeToolsWithReadImage,
 	loadBackupModelId,
 	readImageFile,
 	resolveBackupModel,
 	saveBackupModelId,
 	supportsImages,
+	syncReadImageActivation,
 	textFromAssistant,
 	type ImageBackupRegistry,
 } from "./index";
@@ -116,6 +118,43 @@ describe("supportsImages", () => {
 	it("is false for text-only models", () => {
 		expect(supportsImages(textOnlyModel)).toBe(false);
 		expect(supportsImages(undefined)).toBe(false);
+	});
+});
+
+describe("read-image activation", () => {
+	it("adds read-image to the active list for a text-only model", () => {
+		expect(activeToolsWithReadImage(["read", "bash"], true)).toEqual(["read", "bash", "read-image"]);
+	});
+
+	it("removes read-image from the active list for an image-capable model", () => {
+		expect(activeToolsWithReadImage(["read", "bash", "read-image"], false)).toEqual(["read", "bash"]);
+		expect(activeToolsWithReadImage(["read", "bash"], false)).toEqual(["read", "bash"]);
+	});
+
+	it("activates the tool for a text-only model via setActiveTools", () => {
+		const setActive = vi.fn();
+		syncReadImageActivation(textOnlyModel, () => ["read", "bash"], setActive);
+		expect(setActive).toHaveBeenCalledWith(["read", "bash", "read-image"]);
+	});
+
+	it("deactivates the tool for an image-capable model via setActiveTools", () => {
+		const setActive = vi.fn();
+		syncReadImageActivation(imageModel, () => ["read", "bash", "read-image"], setActive);
+		expect(setActive).toHaveBeenCalledWith(["read", "bash"]);
+	});
+
+	it("treats a missing model as text-only and activates the tool", () => {
+		const setActive = vi.fn();
+		syncReadImageActivation(undefined, () => [], setActive);
+		expect(setActive).toHaveBeenCalledWith(["read-image"]);
+	});
+
+	it("skips setActiveTools when the tool already matches the model", () => {
+		const setActive = vi.fn();
+		syncReadImageActivation(imageModel, () => ["read", "bash"], setActive);
+		syncReadImageActivation(textOnlyModel, () => ["read-image"], setActive);
+		syncReadImageActivation(undefined, () => ["read-image"], setActive);
+		expect(setActive).not.toHaveBeenCalled();
 	});
 });
 

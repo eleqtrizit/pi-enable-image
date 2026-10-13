@@ -25,6 +25,7 @@ Reject the change if any of these are true:
 
 ## Major
 
+- **Activation drift.** `read-image` stays declared to an image-capable model, or stays withdrawn from a text-only model, because the `session_start`/`model_select` sync is missing, skips a source of model changes, or calls `setActiveTools` on every event without comparing first.
 - **Dropped usage.** A successful `read-image` result omits `usage: response.usage`, so session token totals drift.
 - **Settings robustness.** `loadBackupModelId` can throw on missing or malformed JSON, or `saveBackupModelId` changes the file shape `{ backupModel: string }` without a migration note in `README.md`.
 - **Model ID parsing.** The change splits `provider/model-id` in a way that breaks model IDs that contain `/`. The handler joins the rest after the first `/`. Keep that behavior.

@@ -16,6 +16,8 @@ const DESCRIPTION_PROMPT =
 
 const SETTINGS_FILE = "image-backup-model.json";
 
+const READ_IMAGE_TOOL = "read-image";
+
 const SUPPORTED_IMAGE_EXTENSIONS = "png, jpg, jpeg, gif, webp, bmp";
 
 const MAX_TOKENS = 4096;
@@ -167,8 +169,26 @@ function isFile(path: string): boolean {
 	}
 }
 
+/** The active tool list with `read-image` present exactly when the model needs it. */
+export function activeToolsWithReadImage(active: readonly string[], enableReadImage: boolean): string[] {
+	const others = active.filter((name) => name !== READ_IMAGE_TOOL);
+	return enableReadImage ? [...others, READ_IMAGE_TOOL] : others;
+}
+
+/** Activate `read-image` only while the active model cannot view images. Skips no-op updates. */
+export function syncReadImageActivation(
+	model: Model<Api> | undefined,
+	getActive: () => string[],
+	setActive: (toolNames: string[]) => void,
+): void {
+	const active = getActive();
+	// A model that can view images doesn't need descriptions; keep the tool out of its prompt.
+	if (active.includes(READ_IMAGE_TOOL) === !supportsImages(model)) return;
+	setActive(activeToolsWithReadImage(active, !supportsImages(model)));
+}
+
 const readImageTool: ToolDefinition<typeof ReadImageParams, undefined> = {
-	name: "read-image",
+	name: READ_IMAGE_TOOL,
 	label: "Read image",
 	description:
 		"Read an image file and return a thorough text description of it: its type, all visible text, layout, " +
@@ -203,4 +223,12 @@ export default function imageBackupModel(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool(readImageTool);
+
+	// The tool must cost nothing for multimodal models: keep it declared only while needed.
+	pi.on("session_start", (_event, ctx) => {
+		syncReadImageActivation(ctx.model, () => pi.getActiveTools(), (toolNames) => pi.setActiveTools(toolNames));
+	});
+	pi.on("model_select", (event) => {
+		syncReadImageActivation(event.model, () => pi.getActiveTools(), (toolNames) => pi.setActiveTools(toolNames));
+	});
 }
