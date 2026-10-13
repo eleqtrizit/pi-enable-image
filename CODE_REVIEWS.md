@@ -5,7 +5,7 @@ Use this guide to review changes to pi-enable-image. Every finding must cite a f
 ## Review process
 
 1. Read `AGENTS.md` for the file map and standards.
-2. Read the full diff, then read all of `extensions/index.ts`. The handler is small, and context matters.
+2. Read the full diff, then read all of `extensions/index.ts`. The extension is small, and context matters.
 3. Run `npm run typecheck` and `npm test`. Report the exit codes in the review.
 4. Walk the checklist below. Record only items that fail.
 5. Give a verdict: **Approve** or **Request changes**, and list the items that would flip it.
@@ -14,12 +14,10 @@ Use this guide to review changes to pi-enable-image. Every finding must cite a f
 
 Reject the change if any of these are true:
 
-- **Message loss.** A path in the `input` handler can return `transform` with empty or partial text, drop the user's text, or return `handled` or block without the user asking for it. Every failure path must return `{ action: "continue" }`.
-- **Silent failure.** A failure path returns `continue` without a `ctx.ui.notify` that says why.
-- **Extension input transformed.** The `event.source === "extension"` guard is removed, moved below other work, or bypassed.
-- **Unvalidated file reads.** The change reads a path from user text without the `existsSync` and `detectSupportedImageMimeTypeFromFile` checks, or widens `IMAGE_PATH_PATTERN` to match relative paths or non-image extensions without a matching validation.
-- **Unvalidated backup model.** The change calls `modelRegistry.complete` without first confirming that the model exists, supports images, and has `hasConfiguredAuth`.
-- **Images sent to text-only models.** A transform path keeps `images` non-empty while the active model can't accept images.
+- **Reintroduced input interception.** The change adds an `input` handler, transforms user messages, or otherwise reverts the tool-only design removed in the pivot.
+- **Silent failure.** A failure path returns a success-shaped result, or throws without a message the model can act on (missing file, unsupported format, unset or unavailable backup model, missing auth, provider error).
+- **Unvalidated file reads.** The tool reads a path from a model call without the file-exists check and `detectSupportedImageMimeTypeFromFile` acceptance.
+- **Unvalidated backup model.** The tool calls `modelRegistry.complete` without first confirming that the model exists, supports images, and has `hasConfiguredAuth`.
 - **Secrets or credentials** are hardcoded, logged, or written to the settings file.
 - **Typecheck fails**, or the change adds `any`, `@ts-ignore`, `@ts-expect-error`, or `as unknown as`.
 - **Obsolete packages.** The change imports `@mariozechner/*` or `@sinclair/typebox`.
@@ -27,8 +25,7 @@ Reject the change if any of these are true:
 
 ## Major
 
-- **Status leak.** A `ctx.ui.setStatus` key is set and not cleared on every exit path. We recommend `try`/`finally`.
-- **Cost for multimodal models.** Work such as file reads or model lookups runs before the `supportsImages(ctx.model)` early return, when it could run after.
+- **Dropped usage.** A successful `read-image` result omits `usage: response.usage`, so session token totals drift.
 - **Settings robustness.** `loadBackupModelId` can throw on missing or malformed JSON, or `saveBackupModelId` changes the file shape `{ backupModel: string }` without a migration note in `README.md`.
 - **Model ID parsing.** The change splits `provider/model-id` in a way that breaks model IDs that contain `/`. The handler joins the rest after the first `/`. Keep that behavior.
 - **Untested logic.** A new branch, regex, or parser has no Vitest test. Model calls in tests must be stubbed.
@@ -48,43 +45,29 @@ Reject the change if any of these are true:
 
 ## Required patterns
 
-### Fail open in the `input` handler
+### Throw from `execute`, don't return error blobs
+
+pi 0.84.x marks a tool result as failed only when `execute` throws. The thrown message is what the model sees:
 
 ```ts
-// Correct: the user sees why, and the message passes through.
-if (!backupModel || !supportsImages(backupModel)) {
-	ctx.ui.notify(`Backup model ${backupId} unavailable or not image-capable`, "warning");
-	return { action: "continue" };
-}
+// Correct: the model sees the failure and can recover on its next turn.
+if (!isFile(path)) throw new Error(`File not found: ${path}`);
 
-// Wrong: the error is swallowed, or the message is dropped.
-if (!backupModel) return { action: "transform", text: "", images: [] };
-```
-
-### Clear status on all paths
-
-```ts
-ctx.ui.setStatus(STATUS_KEY, `Describing image with ${backupId}...`);
-try {
-	// side query
-} finally {
-	ctx.ui.setStatus(STATUS_KEY, undefined);
-}
+// Wrong: a success-shaped result the model mistakes for a description.
+if (!isFile(path)) return { content: [{ type: "text", text: "File not found" }], details: undefined };
 ```
 
 ### Guard order
 
-Order the checks from cheapest to most expensive, and put the most restrictive first:
+Order the checks from cheapest to most expensive:
 
-1. `event.source === "extension"`
-2. Collect images. Return if there are none.
-3. `supportsImages(ctx.model)`
-4. Settings lookup, then model lookup, then capability check, then auth check.
-5. The side query.
+1. Resolve the path against `ctx.cwd`, then check the file exists and is a supported image.
+2. Settings lookup, then model lookup, then capability check, then auth check.
+3. The side query.
 
 ### Pure helpers stay pure
 
-Keep helpers that parse text or filter models free of `ctx.ui` calls and free of module state. That lets tests call them directly.
+Keep helpers that validate paths, parse settings, or filter models free of `ctx.ui` calls and free of module state. That lets tests call them directly.
 
 ## Out of scope for review
 

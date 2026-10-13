@@ -1,6 +1,6 @@
 # Agent instructions for pi-enable-image
 
-This repository is a pi coding agent extension. When the active model can't accept images, the extension sends each image to a multimodal backup model. It then replaces the image in the user's message with a text description.
+This repository is a pi coding agent extension. It registers a `read-image` tool: the agent gives it a path to an image file, the tool sends the image to a multimodal backup model, and the description comes back as tool-result text the active (possibly text-only) model can read.
 
 If you are doing a code review, read [CODE_REVIEWS.md](CODE_REVIEWS.md) first and follow it.
 
@@ -8,7 +8,8 @@ If you are doing a code review, read [CODE_REVIEWS.md](CODE_REVIEWS.md) first an
 
 | Path | Purpose |
 |------|---------|
-| `extensions/index.ts` | The whole extension: the `/image-backup-model` command, the `input` event handler, settings persistence, clipboard path detection, and the side query to the backup model. |
+| `extensions/index.ts` | The whole extension: the `/image-backup-model` command, the `read-image` tool, settings persistence, file validation, and the side query to the backup model. |
+| `extensions/index.test.ts` | Vitest unit tests: settings persistence, model validation, text extraction, and every `readImageFile` branch. Model calls are stubbed; a temp `HOME` isolates settings. |
 | `package.json` | Package manifest. `pi.extensions` points pi at `extensions/index.ts`. Declares pi packages as peers. |
 | `tsconfig.json` | Strict TypeScript config (ESNext, NodeNext). Used only for typechecking; pi loads TS through jiti, so there is no build step. |
 | `README.md` | User docs: install, configure, how it works. |
@@ -20,13 +21,10 @@ If you are doing a code review, read [CODE_REVIEWS.md](CODE_REVIEWS.md) first an
 
 - `export default function imageBackupModel(pi: ExtensionAPI)` in `extensions/index.ts`. pi calls this factory on load.
 - Command `/image-backup-model`: lists image-capable models (scoped models first, else all available) and saves the choice.
-- Event `pi.on("input", ...)`: runs on every user message. It does the following:
-  1. Skips messages where `event.source === "extension"`.
-  2. Collects attached images and image file paths found in the text.
-  3. Returns `continue` if there are no images or the active model supports images.
-  4. Resolves the backup model and checks it exists, supports images, and has auth.
-  5. Describes each image, then returns `transform` with the description text and `images: []`.
+- Tool `read-image`: takes one `path` argument. It validates the file, asks the configured backup model to describe it, and returns the description text plus the side query's `usage`. Failures throw from `execute`; pi reports the message to the model as the tool's error result.
 - Persisted state: `~/<CONFIG_DIR_NAME>/image-backup-model.json` with shape `{ "backupModel": "<provider>/<model-id>" }`.
+
+Do not add an `input` event handler or transform user messages. The earlier input-interception design was removed on purpose.
 
 ## Commands
 
@@ -37,7 +35,7 @@ npm test                       # vitest run; exits 1 until test files exist
 pi -e ./extensions/index.ts    # load the extension in pi for a manual test
 ```
 
-pi docs and examples ship in `node_modules/@earendil-works/pi-coding-agent/docs/` and `.../examples/extensions/`. Read `events.md` (the `input` event), `extension-context.md`, and `extension-api.md` before you change the handler.
+pi docs and examples ship in `node_modules/@earendil-works/pi-coding-agent/docs/` and `.../examples/extensions/`. Read `extensions.md` (custom tools and the tool `execute` error contract) and `extension-context.md` before you change the tool.
 
 ## Coding standards
 
@@ -59,21 +57,18 @@ pi docs and examples ship in `node_modules/@earendil-works/pi-coding-agent/docs/
 - Keep the extension in a single file until it passes about 300 lines. Split by responsibility after that, into files such as `settings.ts`, `images.ts`, and `describe.ts`.
 - Don't add runtime dependencies for things `node:` or pi already provide. Runtime deps go in `dependencies`, because pi installs with `--omit=dev`.
 
-### Behavior rules for the `input` handler
+### Behavior rules for the `read-image` tool
 
-- Fail open. Any error or missing configuration must return `{ action: "continue" }` with the user's message unchanged, plus a `ctx.ui.notify` that explains why. Never drop or block the message silently.
-- Never transform input from `source === "extension"`.
-- Exit early when the active model supports images. The extension must cost nothing for multimodal models.
-- Clear every `ctx.ui.setStatus` key you set, on success and on failure. Use `finally` when you can.
-- Validate the backup model before you call it: it exists, `input` includes `"image"`, and `hasConfiguredAuth` is true.
-- Treat file paths from user text as untrusted. Check that the file exists and that `detectSupportedImageMimeTypeFromFile` accepts it before you read it.
+- Validate the path before reading anything: it must resolve to an existing file, and `detectSupportedImageMimeTypeFromFile` must accept it. Model-provided paths are untrusted.
+- Validate the backup model before calling it: it exists, `input` includes `"image"`, and `hasConfiguredAuth` is true.
+- Report every failure by throwing from `execute` with a message the model can act on (missing file, unsupported format, unset or unavailable backup model, missing auth, provider error). Never return a success-shaped result for a failure; pi 0.84.x marks a result as failed only on a thrown error.
+- Include the side query's `usage` in a successful tool result so session totals stay accurate.
 - Keep settings reads tolerant. If the JSON is missing or malformed, return `undefined`. Don't throw.
 
 ### Testing
 
 - Use Vitest. Put tests next to the code as `*.test.ts`, or in `test/`.
-- Write unit tests for pure helpers: `IMAGE_PATH_PATTERN` matching, `extractImageAttachments`, `supportsImages`, `candidateModels`, and settings load and save against a temp `HOME`.
-- Test the `input` handler with a fake `ctx` (stub `modelRegistry`, `ui`, and `model`). Cover each early return and the transform path.
+- Write unit tests for pure helpers: settings load and save against a temp `HOME`, `supportsImages`, `textFromAssistant`, and every `resolveBackupModel` and `readImageFile` branch against a stubbed registry.
 - Don't call real model providers in tests.
 
 ### Done criteria

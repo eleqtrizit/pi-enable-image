@@ -1,21 +1,35 @@
-import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, ImageContent, Model } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	detectSupportedImageMimeTypeFromFile,
+	type AgentToolResult,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type InputEventResult,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-
-// Clipboard image paths (e.g. /tmp/pi-clipboard-<uuid>.png) arrive as plain text.
-const IMAGE_PATH_PATTERN = /(?:^|\s)(\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp))(?=\s|$)/gi;
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { Type } from "typebox";
 
 const DESCRIPTION_PROMPT =
 	"Describe this image thoroughly and precisely: its type (screenshot, diagram, photo, ...), all visible text, layout, UI elements under discussion, and whatever a reader would need to act on its contents. Plain prose, no preamble.";
 
 const SETTINGS_FILE = "image-backup-model.json";
+
+const SUPPORTED_IMAGE_EXTENSIONS = "png, jpg, jpeg, gif, webp, bmp";
+
+const MAX_TOKENS = 4096;
+
+/** The slice of the model registry the image describer needs. Keeps test fakes small. */
+export type ImageBackupRegistry = Pick<ExtensionContext["modelRegistry"], "find" | "hasConfiguredAuth" | "complete">;
+
+const ReadImageParams = Type.Object({
+	path: Type.String({
+		description:
+			`Path to the image file (${SUPPORTED_IMAGE_EXTENSIONS}). ` +
+			"Relative paths resolve against the current working directory.",
+	}),
+});
 
 function agentDir(): string {
 	// The agent dir is `<home>/<CONFIG_DIR_NAME>` (typically ~/.pi).
@@ -26,7 +40,7 @@ function settingsPath(): string {
 	return join(agentDir(), SETTINGS_FILE);
 }
 
-function loadBackupModelId(): string | undefined {
+export function loadBackupModelId(): string | undefined {
 	const path = settingsPath();
 	if (!existsSync(path)) return undefined;
 	try {
@@ -37,75 +51,137 @@ function loadBackupModelId(): string | undefined {
 	}
 }
 
-function saveBackupModelId(id: string): void {
+export function saveBackupModelId(id: string): void {
 	const path = settingsPath();
 	mkdirSync(agentDir(), { recursive: true });
 	writeFileSync(path, JSON.stringify({ backupModel: id }, null, 2));
 }
 
-function supportsImages(model: Model<Api> | undefined | null): boolean {
+export function supportsImages(model: Model<Api> | undefined | null): boolean {
 	return !!model && model.input.includes("image");
 }
 
 /** List candidate backup models: scoped models first, else the full catalogue; image-capable only. */
-function candidateModels(ctx: ExtensionContext): Model<Api>[] {
+export function candidateModels(ctx: ExtensionContext): Model<Api>[] {
 	const scoped = ctx.scopedModels.map((s) => s.model);
 	const pool = scoped.length > 0 ? scoped : ctx.modelRegistry.getAvailable();
 	return pool.filter((m) => supportsImages(m));
 }
 
-/** Find image file paths in the prompt text, verify each is a supported image, and load it as an attachment. */
-async function extractImageAttachments(
-	text: string,
-): Promise<{ images: ImageContent[]; remainingText: string }> {
-	const paths = [...text.matchAll(IMAGE_PATH_PATTERN)].map((m) => m[1] ?? "").filter(Boolean);
-	if (paths.length === 0) return { images: [], remainingText: text };
+type BackupResolution = { ok: true; model: Model<Api> } | { ok: false; error: string };
 
-	const images: ImageContent[] = [];
-	const kept: string[] = [];
-	for (const path of paths) {
-		if (!existsSync(path)) {
-			kept.push(path);
-			continue;
-		}
-		const mimeType = await detectSupportedImageMimeTypeFromFile(path);
-		if (!mimeType) {
-			kept.push(path);
-			continue;
-		}
-		images.push({ type: "image", data: readFileSync(path, "base64"), mimeType });
+/** Look up the configured backup model and validate it before any model call. */
+export function resolveBackupModel(registry: ImageBackupRegistry): BackupResolution {
+	const backupId = loadBackupModelId();
+	if (!backupId) {
+		return { ok: false, error: "No image backup model configured. Run /image-backup-model to set one." };
 	}
-	const remainingText = kept.length === paths.length ? text : text.replace(IMAGE_PATH_PATTERN, " ").trim();
-	return { images, remainingText };
+	// Model ids can contain "/" after the provider, so only the first segment names the provider.
+	const [provider, ...rest] = backupId.split("/");
+	const backupModel = registry.find(provider, rest.join("/"));
+	if (!backupModel) {
+		return { ok: false, error: `Image backup model ${backupId} is not in the catalogue. Run /image-backup-model.` };
+	}
+	if (!supportsImages(backupModel)) {
+		return { ok: false, error: `Image backup model ${backupId} cannot accept images. Run /image-backup-model.` };
+	}
+	if (!registry.hasConfiguredAuth(backupModel)) {
+		return { ok: false, error: `Image backup model ${backupId} has no configured auth.` };
+	}
+	return { ok: true, model: backupModel };
 }
 
-async function describeImage(
-	backupModel: Model<Api>,
-	image: ImageContent,
-	ctx: ExtensionContext,
-): Promise<string> {
-	const response = await ctx.modelRegistry.complete(
-		backupModel,
-		{
-			messages: [
-				{
-					role: "user",
-					content: [
-						{ type: "text", text: DESCRIPTION_PROMPT },
-						{ type: "image", data: image.data, mimeType: image.mimeType },
-					],
-					timestamp: Date.now(),
-				},
-			],
-		},
-		{ maxTokens: 4096, cacheRetention: "none" },
-	);
-	return response.content
+/** Extract the joined text of an assistant response. */
+export function textFromAssistant(message: AssistantMessage): string {
+	return message.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map((c) => c.text)
 		.join("\n")
 		.trim();
 }
+
+async function describeImage(
+	backupModel: Model<Api>,
+	image: ImageContent,
+	registry: ImageBackupRegistry,
+): Promise<AssistantMessage> {
+	const context: Context = {
+		messages: [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: DESCRIPTION_PROMPT },
+					{ type: "image", data: image.data, mimeType: image.mimeType },
+				],
+				timestamp: Date.now(),
+			},
+		],
+	};
+	return registry.complete(backupModel, context, { maxTokens: MAX_TOKENS, cacheRetention: "none" });
+}
+
+/**
+ * Validate the target file, describe it with the backup model, and shape the tool result.
+ * Throws on invalid input or a failed description; pi reports the message to the model as
+ * the tool's error result.
+ */
+export async function readImageFile(
+	rawPath: string,
+	cwd: string,
+	registry: ImageBackupRegistry,
+): Promise<AgentToolResult<undefined>> {
+	const path = resolve(cwd, rawPath);
+
+	// Model-provided paths are untrusted: confirm a real file and a supported image before reading.
+	if (!isFile(path)) {
+		throw new Error(`File not found: ${path}`);
+	}
+	const mimeType = await detectSupportedImageMimeTypeFromFile(path);
+	if (!mimeType) {
+		throw new Error(`Not a supported image file (${SUPPORTED_IMAGE_EXTENSIONS}): ${path}`);
+	}
+
+	const backup = resolveBackupModel(registry);
+	if (!backup.ok) throw new Error(backup.error);
+
+	let response: AssistantMessage;
+	try {
+		const image: ImageContent = { type: "image", data: readFileSync(path, "base64"), mimeType };
+		response = await describeImage(backup.model, image, registry);
+	} catch (error) {
+		throw new Error(`Image description failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const text = textFromAssistant(response);
+	if (!text) {
+		throw new Error(`The backup model returned an empty description for ${path}.`);
+	}
+	// Report the side query's usage so session totals stay accurate.
+	return { content: [{ type: "text", text }], details: undefined, usage: response.usage };
+}
+
+function isFile(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+const readImageTool: ToolDefinition<typeof ReadImageParams, undefined> = {
+	name: "read-image",
+	label: "Read image",
+	description:
+		"Read an image file and return a thorough text description of it: its type, all visible text, layout, " +
+		"UI elements, and whatever is needed to act on the contents. The description comes from the multimodal " +
+		`backup model picked with /image-backup-model. Use this tool when the active model cannot view images ` +
+		`directly. Supported formats: ${SUPPORTED_IMAGE_EXTENSIONS}.`,
+	promptSnippet:
+		"read-image(path): describe an image file with the multimodal backup model when you cannot view images yourself",
+	parameters: ReadImageParams,
+	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		return readImageFile(params.path, ctx.cwd, ctx.modelRegistry);
+	},
+};
 
 export default function imageBackupModel(pi: ExtensionAPI) {
 	pi.registerCommand("image-backup-model", {
@@ -126,51 +202,5 @@ export default function imageBackupModel(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("input", async (event, ctx): Promise<InputEventResult> => {
-		// Only touch real user input; never extension-injected messages.
-		if (event.source === "extension") return { action: "continue" };
-
-		// Clipboard image pastes arrive as plain file paths in the text, not as attachments.
-		const { images: fromPaths, remainingText } = await extractImageAttachments(event.text);
-		const images = [...(event.images ?? []), ...fromPaths];
-		if (images.length === 0) return { action: "continue" };
-		if (supportsImages(ctx.model)) return { action: "continue" };
-
-		const backupId = loadBackupModelId();
-		if (!backupId) {
-			ctx.ui.notify("Model cannot see images. Set one with /image-backup-model.", "warning");
-			return { action: "continue" };
-		}
-		const [provider, ...rest] = backupId.split("/");
-		const backupModel = ctx.modelRegistry.find(provider, rest.join("/"));
-		if (!backupModel || !supportsImages(backupModel)) {
-			ctx.ui.notify(`Backup model ${backupId} unavailable or not image-capable`, "warning");
-			return { action: "continue" };
-		}
-		if (!ctx.modelRegistry.hasConfiguredAuth(backupModel)) {
-			ctx.ui.notify(`Backup model ${backupId} has no configured auth`, "warning");
-			return { action: "continue" };
-		}
-
-		try {
-			const descriptions: string[] = [];
-			for (const image of images) {
-				ctx.ui.setStatus("image-backup", `Describing image with ${backupId}...`);
-				descriptions.push(await describeImage(backupModel, image, ctx));
-			}
-			ctx.ui.setStatus("image-backup", undefined);
-
-			const block = descriptions
-				.map((d) => `<image description>\n${d}\n</image description>`)
-				.join("\n\n");
-			const text = remainingText.trim() ? `${remainingText}\n\n${block}` : block;
-			// Drop the images from the outgoing message; the text-only model gets prose instead.
-			return { action: "transform", text, images: [] };
-		} catch (error) {
-			ctx.ui.setStatus("image-backup", undefined);
-			ctx.ui.notify(`Image description failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-			// Pass through unchanged so the original provider error is visible.
-			return { action: "continue" };
-		}
-	});
+	pi.registerTool(readImageTool);
 }
